@@ -2,15 +2,18 @@
 
 import { useEffect, useState } from "react";
 import {
+  auditEvidence,
   parseBrief,
   parseDecisionContract,
   parseDiscovery,
+  suggestEvidenceSelection,
   type Brief,
   type Competitor,
+  type CoverageAudit,
   type DecisionContract,
   type Posture,
 } from "@/lib/plinth-contracts";
-type LedgerEntry = { id: number; actor: "Distiller" | "Researcher" | "Analyst" | "Decision maker"; action: string; why: string; references: string[]; at: string };
+type LedgerEntry = { id: number; actor: "Distiller" | "Researcher" | "Coverage auditor" | "Analyst" | "Decision maker"; action: string; why: string; references: string[]; at: string };
 
 const examples = [
   { label: "Payroll platform", text: "A payroll software company needs to choose within six months between expanding embedded distribution through vertical SaaS partners and building a broader PEO offering. PEO customers produce materially higher revenue, but licensing, insurance, compliance, and support create significant exposure. Roughly 40 vertical platforms could become partners, while unified workforce products are winning larger customers." },
@@ -21,8 +24,41 @@ const examples = [
   { label: "AI support", text: "A regional bank must decide whether to build an AI customer-support assistant internally, buy a banking-specific platform, or partner with its existing contact-center vendor. The decision is constrained by regulatory review, sensitive customer data, and a nine-month target." },
 ];
 
+function mergeUnique(values: string[]) {
+  return [...new Set(values)];
+}
+
+function mergeEvidenceSets(existing: Competitor[], incoming: Competitor[]) {
+  const merged = existing.map((item) => ({ ...item }));
+  for (const candidate of incoming) {
+    const index = merged.findIndex((item) => item.name.toLowerCase() === candidate.name.toLowerCase());
+    if (index < 0) {
+      merged.push(candidate);
+      continue;
+    }
+    const current = merged[index];
+    const coverage = [...current.coverage];
+    for (const item of candidate.coverage) {
+      const coverageIndex = coverage.findIndex((entry) => entry.requirementId === item.requirementId);
+      if (coverageIndex < 0 || coverage[coverageIndex].stance === "Context") {
+        if (coverageIndex < 0) coverage.push(item);
+        else coverage[coverageIndex] = item;
+      }
+    }
+    merged[index] = {
+      ...current,
+      relevance: candidate.relevance,
+      signals: mergeUnique([...current.signals, ...candidate.signals]).slice(0, 3),
+      sources: mergeUnique([...current.sources, ...candidate.sources]).slice(0, 4),
+      sourceType: candidate.sourceType,
+      coverage,
+    };
+  }
+  return merged;
+}
+
 export function PlinthStudio() {
-  const [stage, setStage] = useState<"intake" | "discovering" | "select" | "analyzing" | "brief">("intake");
+  const [stage, setStage] = useState<"intake" | "discovering" | "researching-gaps" | "select" | "analyzing" | "brief">("intake");
   const [decision, setDecision] = useState("");
   const [company, setCompany] = useState("");
   const [description, setDescription] = useState("");
@@ -37,6 +73,8 @@ export function PlinthStudio() {
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [workingPosture, setWorkingPosture] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [briefProvisional, setBriefProvisional] = useState(false);
 
   async function request(action: "contract" | "discover" | "analyze", extra: object = {}) {
     let response: Response;
@@ -70,8 +108,11 @@ export function PlinthStudio() {
     return data;
   }
 
+  const selectedEvidence = selected.map((index) => competitors[index]).filter(Boolean);
+  const coverageAudit: CoverageAudit | null = contract ? auditEvidence(contract, selectedEvidence) : null;
+
   async function discover() {
-    setError(""); setStage("discovering");
+    setError(""); setNotice(""); setStage("discovering");
     try {
       const canReuseContract = contract && contractDecision === decision;
       const frozenContract = canReuseContract
@@ -82,31 +123,77 @@ export function PlinthStudio() {
         setContractDecision(decision);
         setLedger([{ id: 1, actor: "Distiller", action: `Froze decision contract ${frozenContract.version}`, why: "Research needs an explicit reference intent that downstream roles cannot rewrite.", references: frozenContract.acceptanceCriteria.map(item => item.id), at: new Date().toISOString() }]);
       }
-      const data = parseDiscovery(await request("discover", { contract: frozenContract }));
+      const data = parseDiscovery(await request("discover", { contract: frozenContract }), frozenContract);
       setFrame(data.frame);
       setCompetitors(data.competitors);
-      setSelected(data.competitors.map((_: Competitor, i: number) => i).slice(0, 4));
+      setSelected(suggestEvidenceSelection(frozenContract, data.competitors));
       setLedger(entries => [...entries, { id: entries.length + 1, actor: "Researcher", action: "Proposed a research set", why: "These external perspectives can materially test the frozen criteria and assumptions.", references: data.competitors.flatMap((item: Competitor) => item.sources).slice(0, 8), at: new Date().toISOString() }]);
       setStage("select");
     }
     catch (e) { setError(e instanceof Error ? e.message : "Discovery failed"); setStage("intake"); }
   }
 
-  async function analyze() {
-    if (!contract) return;
-    setError(""); setStage("analyzing");
+  async function researchGaps() {
+    if (!contract || !coverageAudit?.missingRequirementIds.length) return;
+    setError(""); setNotice(""); setStage("researching-gaps");
     try {
-      const chosen = selected.map((i) => competitors[i]);
+      const data = parseDiscovery(
+        await request("discover", {
+          contract,
+          focusRequirementIds: coverageAudit.missingRequirementIds,
+        }),
+        contract,
+      );
+      const merged = mergeEvidenceSets(competitors, data.competitors);
+      const newCount = merged.length - competitors.length;
+      setCompetitors(merged);
+      setFrame(`${frame}\n\nGap research: ${data.frame}`);
+      setLedger(entries => [...entries, {
+        id: entries.length + 1,
+        actor: "Researcher",
+        action: `Researched ${coverageAudit.missingRequirementIds.length} evidence gaps`,
+        why: "The deterministic coverage audit found decision paths that the selected evidence could not yet scrutinize.",
+        references: coverageAudit.missingRequirementIds,
+        at: new Date().toISOString(),
+      }]);
+      setNotice(`${newCount || data.competitors.length} gap-focused perspectives are ready for review. Select the evidence that belongs in the brief.`);
+      setStage("select");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Gap research failed");
+      setStage("select");
+    }
+  }
+
+  async function analyze(provisional = false) {
+    if (!contract || !coverageAudit || (!coverageAudit.ready && !provisional)) return;
+    setError(""); setNotice(""); setStage("analyzing");
+    try {
+      const chosen = selectedEvidence;
       setLedger(entries => [...entries, { id: entries.length + 1, actor: "Decision maker", action: "Accepted the evidence set", why: "Only human-selected perspectives are allowed to shape the brief.", references: chosen.map(item => item.name), at: new Date().toISOString() }]);
-      const data = parseBrief(await request("analyze", { contract, competitors: chosen }));
+      setLedger(entries => [...entries, {
+        id: entries.length + 1,
+        actor: provisional ? "Decision maker" : "Coverage auditor",
+        action: provisional ? "Overrode the evidence readiness gate" : "Cleared the evidence readiness gate",
+        why: provisional
+          ? `The decision maker authorized a provisional brief with ${coverageAudit.missingRequirementIds.length} visible gaps.`
+          : "Every frozen evidence requirement has at least one selected supporting or challenging perspective.",
+        references: provisional ? coverageAudit.missingRequirementIds : contract.evidenceRequirements.map((item) => item.id),
+        at: new Date().toISOString(),
+      }]);
+      const data = parseBrief(await request("analyze", { contract, competitors: chosen, provisional }));
       setBrief(data);
+      setBriefProvisional(provisional);
       setLedger(entries => [...entries, { id: entries.length + 1, actor: "Analyst", action: "Produced distinct postures", why: "Each posture was checked against the frozen acceptance criteria without selecting a winner.", references: data.postures.map((item: Posture) => item.name), at: new Date().toISOString() }]);
       setStage("brief");
     }
     catch (e) { setError(e instanceof Error ? e.message : "Analysis failed"); setStage("select"); }
   }
 
-  const step = stage === "intake" || stage === "discovering" ? 1 : stage === "select" || stage === "analyzing" ? 2 : 3;
+  const step = stage === "intake" || stage === "discovering"
+    ? 1
+    : stage === "select" || stage === "researching-gaps" || stage === "analyzing"
+      ? 2
+      : 3;
   const posture = brief?.postures[active];
 
   function prepareExecutionPacket() {
@@ -116,7 +203,7 @@ export function PlinthStudio() {
   }
 
   function copyBrief() {
-    navigator.clipboard.writeText(JSON.stringify({ contract, brief, reasoningLedger: ledger }, null, 2));
+    navigator.clipboard.writeText(JSON.stringify({ contract, coverageAudit, provisional: briefProvisional, brief, reasoningLedger: ledger }, null, 2));
   }
 
   function applyExample(text: string) {
@@ -136,25 +223,28 @@ export function PlinthStudio() {
       <div className="sample-row"><span>TRY A SAMPLE</span><div>{examples.map(example=><button key={example.label} onClick={()=>applyExample(example.text)}>{example.label}<i>→</i></button>)}</div></div>
     </section><Marketing /></>}
 
-    {stage === "discovering" && <Loading title="Freezing intent, then researching" detail="The Distiller creates the reference contract before the Researcher is allowed to search." lines={["Distill numbered acceptance criteria", "Freeze constraints and assumptions", "Search current public evidence", "Separate competitors, alternatives, and analogs", "Check source relevance"]}/>}
+    {stage === "discovering" && <Loading title="Freezing intent, then researching" detail="The Distiller creates the reference contract and a balanced research mandate before the Researcher is allowed to search." lines={["Distill numbered acceptance criteria", "Name the strategic paths", "Define falsifiable evidence requirements", "Search current public evidence", "Map sources to the mandate"]}/>}
 
-    {stage === "select" && contract && <section className="frame compact-page page-enter">
-      <div className="selection-heading"><div><div className="section-index">02 / CHOOSE THE EVIDENCE SET</div><h1>Which perspectives<br/>belong in the brief?</h1><p>Select the competitors and alternatives that should shape the analysis.</p></div><details className="research-frame"><summary>What the research found</summary><p>{frame}</p></details></div>
+    {stage === "researching-gaps" && <Loading title="Researching the uncovered paths" detail="The Researcher is constrained to the evidence requirements the coverage audit marked missing." lines={["Read the missing requirements", "Search for path-specific evidence", "Look for disconfirming evidence", "Attach exact requirement IDs", "Return perspectives for human review"]}/>}
+
+    {stage === "select" && contract && coverageAudit && <section className="frame compact-page page-enter">
+      <div className="selection-heading"><div><div className="section-index">02 / AUDIT THE EVIDENCE SET</div><h1>Is every path<br/>ready for scrutiny?</h1><p>Select the perspectives that belong in the brief. Plinth will show which frozen research requirements they cover—and which paths remain exposed.</p></div><details className="research-frame"><summary>What the research found</summary><p>{frame}</p></details></div>
       <section className="decision-contract">
         <header><div><span>DECISION CONTRACT · {contract.version}</span><strong>Frozen before research</strong></div><p>{contract.decisionStatement}</p></header>
         <ol>{contract.acceptanceCriteria.map(item=><li key={item.id}><span>{item.id}</span><div><strong>{item.criterion}</strong><small>Verify: {item.verification}</small></div></li>)}</ol>
-        <details><summary>{contract.assumptions.length} assumptions · {contract.constraints.length} constraints · inspect contract</summary><div className="contract-details"><div><h3>Assumptions and falsifiers</h3>{contract.assumptions.map(item=><p key={item.id}><b>{item.id}</b> {item.claim}<small>Falsified by: {item.falsifier}</small></p>)}</div><div><h3>Boundaries</h3><p><b>Authority</b> {contract.decisionAuthority}</p><p><b>Review trigger</b> {contract.reviewTrigger}</p><p><b>Non-goals</b> {contract.nonGoals.join("; ")}</p></div></div></details>
+        <details><summary>{contract.strategicPaths.length} paths · {contract.evidenceRequirements.length} evidence requirements · inspect contract</summary><div className="contract-details"><div><h3>Assumptions and falsifiers</h3>{contract.assumptions.map(item=><p key={item.id}><b>{item.id}</b> {item.claim}<small>Falsified by: {item.falsifier}</small></p>)}</div><div><h3>Boundaries</h3><p><b>Authority</b> {contract.decisionAuthority}</p><p><b>Review trigger</b> {contract.reviewTrigger}</p><p><b>Non-goals</b> {contract.nonGoals.join("; ")}</p></div></div></details>
       </section>
-      <div className="selection-bar"><strong>{selected.length} selected</strong><span>Choose at least one. You can challenge this set later.</span><button className="primary" disabled={!selected.length} onClick={analyze}>Build the brief <span>→</span></button></div>
-      <div className="competitor-grid">{competitors.map((c,i)=>{const on=selected.includes(i);return <button className={on?"intel-card selected":"intel-card"} key={c.name} onClick={()=>setSelected(s=>on?s.filter(x=>x!==i):[...s,i])}><div className="intel-top"><span>{c.relationship}</span><i>{on?"✓":"+"}</i></div><h2>{c.name}</h2><p>{c.relevance}</p><ul>{c.signals.map(x=><li key={x}>{x}</li>)}</ul><div className="source-count">{c.sources.length} source{c.sources.length===1?"":"s"}</div></button>})}</div>
+      <CoverageGate audit={coverageAudit} selectedCount={selected.length} onResearchGaps={researchGaps} onBuild={analyze}/>
+      {notice&&<p className="notice">{notice}</p>}
+      <div className="competitor-grid">{competitors.map((c,i)=>{const on=selected.includes(i);return <button className={on?"intel-card selected":"intel-card"} key={c.name} onClick={()=>{setNotice("");setSelected(s=>on?s.filter(x=>x!==i):[...s,i])}}><div className="intel-top"><span>{c.relationship} · {c.sourceType}</span><i>{on?"✓":"+"}</i></div><h2>{c.name}</h2><p>{c.relevance}</p><div className="coverage-tags">{c.coverage.map(item=><span data-stance={item.stance.toLowerCase()} key={item.requirementId}>{item.requirementId} · {item.stance}</span>)}</div><ul>{c.signals.map(x=><li key={x}>{x}</li>)}</ul><div className="source-count">{c.sources.length} source{c.sources.length===1?"":"s"}</div></button>})}</div>
       {error&&<p className="error">{error}</p>}
-      <div className="frame-footer"><button className="text-button" onClick={()=>setStage("intake")}>← Create a new contract</button><span>{selected.length} selected</span><button className="primary" disabled={!selected.length} onClick={analyze}>Build the brief <span>→</span></button></div>
+      <div className="frame-footer"><button className="text-button" onClick={()=>setStage("intake")}>← Create a new contract</button><span>{selected.length} selected · {coverageAudit.coveredCount}/{coverageAudit.totalCount} requirements covered</span></div>
     </section>}
 
     {stage === "analyzing" && <Loading title="Testing postures against the contract" detail="The Analyst can map evidence and contradictions, but cannot rewrite intent or select a winner." lines={["Deepen the selected research", "Find patterns and contradictions", "Build genuinely distinct postures", "Check every acceptance criterion", "Frame the cheapest falsification tests"]}/>}
 
     {stage === "brief"&&brief&&posture&&contract&&<section className="brief compact-page page-enter">
-      <div className="brief-choice-head"><div><div className="section-index">03 / CHOOSE A POSTURE TO CHALLENGE</div><h1>Where should the<br/>team push first?</h1><p>{brief.disagreement}</p></div><div className="brief-tools"><button className="secondary" onClick={copyBrief}>Copy audited brief</button><details className="research-frame"><summary>The decision beneath the decision</summary><p>{brief.reframe}</p></details></div></div>
+      <div className="brief-choice-head"><div><div className="section-index">03 / {briefProvisional ? "PROVISIONAL BRIEF · GAPS PRESERVED" : "AUDITED BRIEF · MANDATE COVERED"}</div><h1>Where should the<br/>team push first?</h1><p>{brief.disagreement}</p></div><div className="brief-tools"><button className="secondary" onClick={copyBrief}>Copy {briefProvisional ? "provisional" : "audited"} brief</button><details className="research-frame"><summary>The decision beneath the decision</summary><p>{brief.reframe}</p></details></div></div>
       <div className="posture-choices">{brief.postures.map((p,i)=><button className={active===i?"posture-choice active":"posture-choice"} key={p.name} onClick={()=>{setActive(i);setWorkingPosture(null)}}><span>0{i+1} · {p.mode}</span><strong>{p.name}</strong><small>Optimizes for {p.optimizes}</small><em>{active===i?"Inspecting":"Inspect posture"} →</em></button>)}</div>
       <article className="posture-detail standalone">
         <div className="epistemic-strip"><span><b>{posture.support.filter(item=>item.epistemicState==="Evidence-supported").length}</b> supported</span><span><b>{posture.assumptions.length}</b> assumed</span><span><b>{posture.support.filter(item=>item.epistemicState==="Contested").length + posture.counterevidence.length}</b> contested</span><span><b>{posture.criteriaCoverage.filter(item=>item.fit==="Unknown").length}</b> unknown</span></div>
@@ -171,6 +261,39 @@ export function PlinthStudio() {
       <footer className="brief-footer"><button onClick={()=>setStage("select")}>← Challenge the evidence set</button><button onClick={()=>setStage("intake")}>Start a new decision</button></footer>
     </section>}
   </main>;
+}
+
+function CoverageGate({
+  audit,
+  selectedCount,
+  onResearchGaps,
+  onBuild,
+}: {
+  audit: CoverageAudit;
+  selectedCount: number;
+  onResearchGaps: () => void;
+  onBuild: (provisional?: boolean) => void;
+}) {
+  return <section className={audit.ready ? "coverage-gate ready" : "coverage-gate"}>
+    <header>
+      <div><span>EVIDENCE READINESS · DETERMINISTIC GATE</span><h2>{audit.ready ? "Ready for an audited brief." : `${audit.missingRequirementIds.length} evidence gap${audit.missingRequirementIds.length === 1 ? "" : "s"} would bias the brief.`}</h2></div>
+      <strong>{audit.coveredCount}/{audit.totalCount}<small>requirements covered</small></strong>
+    </header>
+    <p className="coverage-explainer">Coverage is calculated from the frozen mandate and your selected evidence. Supporting or challenging evidence closes a cell; context alone does not.</p>
+    <div className="coverage-paths">{audit.paths.map(pathAudit=><article data-state={pathAudit.state.toLowerCase()} key={pathAudit.path.id}>
+      <header><span>{pathAudit.path.id}</span><div><h3>{pathAudit.path.name}</h3><p>{pathAudit.path.description}</p></div><strong>{pathAudit.coveredCount}/{pathAudit.totalCount}</strong></header>
+      <ul>{audit.requirements.filter(item=>item.requirement.pathId===pathAudit.path.id).map(item=><li data-state={item.state.toLowerCase()} key={item.requirement.id}><span>{item.state === "Missing" ? "○" : item.state === "Contested" ? "◐" : "●"}</span><div><b>{item.requirement.id}</b><p>{item.requirement.question}</p><small>{item.state === "Missing" ? `Needed: ${item.requirement.evidenceNeeded}` : `${item.state} by ${item.evidenceNames.join(", ")}`}</small></div></li>)}</ul>
+    </article>)}</div>
+    <footer>
+      <div><strong>{selectedCount} perspective{selectedCount===1?"":"s"} selected</strong><span>{audit.ready ? "The Coverage Auditor can clear this set." : "The Analyst cannot clear its own evidence gaps."}</span></div>
+      <div className="coverage-actions">
+        {!audit.ready&&<button className="secondary" disabled={!selectedCount} onClick={onResearchGaps}>Research missing evidence</button>}
+        {!audit.ready&&<button className="provisional-button" disabled={!selectedCount} onClick={()=>onBuild(true)}>Build provisional brief</button>}
+        <button className="primary" disabled={!selectedCount||!audit.ready} onClick={()=>onBuild(false)}>Build audited brief <span>→</span></button>
+      </div>
+    </footer>
+    {!audit.ready&&<p className="gate-note">A provisional override is allowed, but the missing requirement IDs will be written into the audit trail and carried into the analysis prompt.</p>}
+  </section>;
 }
 
 function Loading({title,detail,lines}:{title:string;detail:string;lines:string[]}) {

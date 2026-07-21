@@ -1,9 +1,28 @@
 export type Competitor = {
   name: string;
-  relationship: "Direct" | "Adjacent" | "Analog";
+  relationship: "Direct" | "Adjacent" | "Analog" | "Candidate";
   relevance: string;
   signals: string[];
   sources: string[];
+  sourceType: "Primary" | "Customer" | "Independent" | "Regulatory" | "Market data";
+  coverage: EvidenceCoverage[];
+};
+
+export type EvidenceCoverage = {
+  requirementId: string;
+  stance: "Supports" | "Challenges" | "Context";
+  explanation: string;
+};
+
+export type StrategicPath = { id: string; name: string; description: string };
+
+export type EvidenceRequirement = {
+  id: string;
+  pathId: string;
+  question: string;
+  evidenceNeeded: string;
+  disconfirmingEvidence: string;
+  criterionIds: string[];
 };
 
 export type DecisionContract = {
@@ -15,6 +34,8 @@ export type DecisionContract = {
   assumptions: { id: string; claim: string; falsifier: string }[];
   decisionAuthority: string;
   reviewTrigger: string;
+  strategicPaths: StrategicPath[];
+  evidenceRequirements: EvidenceRequirement[];
 };
 
 export type Posture = {
@@ -47,6 +68,24 @@ export type Brief = {
 };
 
 export type Discovery = { frame: string; competitors: Competitor[] };
+
+export type CoverageAudit = {
+  ready: boolean;
+  coveredCount: number;
+  totalCount: number;
+  missingRequirementIds: string[];
+  requirements: Array<{
+    requirement: EvidenceRequirement;
+    state: "Covered" | "Contested" | "Missing";
+    evidenceNames: string[];
+  }>;
+  paths: Array<{
+    path: StrategicPath;
+    coveredCount: number;
+    totalCount: number;
+    state: "Covered" | "Partial" | "Missing";
+  }>;
+};
 
 export class PlinthShapeError extends Error {
   constructor(path: string) {
@@ -94,9 +133,13 @@ function choice<const T extends readonly string[]>(value: unknown, path: string,
   return value as T[number];
 }
 
+function requireUnique(values: string[], path: string) {
+  if (new Set(values).size !== values.length) throw new PlinthShapeError(path);
+}
+
 export function parseDecisionContract(value: unknown, fallbackVersion?: string): DecisionContract {
   const input = record(value, "decision contract");
-  return {
+  const result: DecisionContract = {
     version: fallbackVersion ?? text(input.version, "decision contract.version"),
     decisionStatement: text(input.decisionStatement, "decision contract.decisionStatement"),
     acceptanceCriteria: list(
@@ -129,29 +172,199 @@ export function parseDecisionContract(value: unknown, fallbackVersion?: string):
     ),
     decisionAuthority: text(input.decisionAuthority, "decision contract.decisionAuthority"),
     reviewTrigger: text(input.reviewTrigger, "decision contract.reviewTrigger"),
+    strategicPaths: list(
+      input.strategicPaths,
+      "decision contract.strategicPaths",
+      (item, path) => {
+        const entry = record(item, path);
+        return {
+          id: text(entry.id, `${path}.id`),
+          name: text(entry.name, `${path}.name`),
+          description: text(entry.description, `${path}.description`),
+        };
+      },
+      { min: 2, max: 4 },
+    ),
+    evidenceRequirements: list(
+      input.evidenceRequirements,
+      "decision contract.evidenceRequirements",
+      (item, path) => {
+        const entry = record(item, path);
+        return {
+          id: text(entry.id, `${path}.id`),
+          pathId: text(entry.pathId, `${path}.pathId`),
+          question: text(entry.question, `${path}.question`),
+          evidenceNeeded: text(entry.evidenceNeeded, `${path}.evidenceNeeded`),
+          disconfirmingEvidence: text(entry.disconfirmingEvidence, `${path}.disconfirmingEvidence`),
+          criterionIds: textList(entry.criterionIds, `${path}.criterionIds`, { min: 1, max: 4 }),
+        };
+      },
+      { min: 3, max: 12 },
+    ),
+  };
+
+  const criterionIds = result.acceptanceCriteria.map((item) => item.id);
+  const pathIds = result.strategicPaths.map((item) => item.id);
+  const requirementIds = result.evidenceRequirements.map((item) => item.id);
+  requireUnique(criterionIds, "decision contract.acceptanceCriteria ids");
+  requireUnique(pathIds, "decision contract.strategicPaths ids");
+  requireUnique(requirementIds, "decision contract.evidenceRequirements ids");
+  const criterionSet = new Set(criterionIds);
+  const pathSet = new Set(pathIds);
+  for (const requirement of result.evidenceRequirements) {
+    if (!pathSet.has(requirement.pathId) || requirement.criterionIds.some((id) => !criterionSet.has(id))) {
+      throw new PlinthShapeError(`decision contract.evidenceRequirements.${requirement.id}`);
+    }
+  }
+  for (const path of result.strategicPaths) {
+    if (!result.evidenceRequirements.some((requirement) => requirement.pathId === path.id)) {
+      throw new PlinthShapeError(`decision contract.strategicPaths.${path.id}.evidenceRequirements`);
+    }
+  }
+  return result;
+}
+
+function parseCompetitor(value: unknown, path: string): Competitor {
+  const entry = record(value, path);
+  return {
+    name: text(entry.name, `${path}.name`),
+    relationship: choice(
+      entry.relationship,
+      `${path}.relationship`,
+      ["Direct", "Adjacent", "Analog", "Candidate"] as const,
+    ),
+    relevance: text(entry.relevance, `${path}.relevance`),
+    signals: textList(entry.signals, `${path}.signals`, { min: 1, max: 3 }),
+    sources: textList(entry.sources, `${path}.sources`, { min: 1, max: 4 }),
+    sourceType: choice(
+      entry.sourceType,
+      `${path}.sourceType`,
+      ["Primary", "Customer", "Independent", "Regulatory", "Market data"] as const,
+    ),
+    coverage: list(
+      entry.coverage,
+      `${path}.coverage`,
+      (coverageItem, coveragePath) => {
+        const coverage = record(coverageItem, coveragePath);
+        return {
+          requirementId: text(coverage.requirementId, `${coveragePath}.requirementId`),
+          stance: choice(
+            coverage.stance,
+            `${coveragePath}.stance`,
+            ["Supports", "Challenges", "Context"] as const,
+          ),
+          explanation: text(coverage.explanation, `${coveragePath}.explanation`),
+        };
+      },
+      { min: 1, max: 6 },
+    ),
   };
 }
 
-export function parseDiscovery(value: unknown): Discovery {
+function validateCoverage(competitors: Competitor[], contract: DecisionContract) {
+  const requirementIds = new Set(contract.evidenceRequirements.map((item) => item.id));
+  for (const competitor of competitors) {
+    requireUnique(
+      competitor.coverage.map((item) => item.requirementId),
+      `research result.competitors.${competitor.name}.coverage requirement ids`,
+    );
+    if (competitor.coverage.some((item) => !requirementIds.has(item.requirementId))) {
+      throw new PlinthShapeError(`research result.competitors.${competitor.name}.coverage`);
+    }
+  }
+}
+
+export function parseDiscovery(value: unknown, contract?: DecisionContract): Discovery {
   const input = record(value, "research result");
-  return {
+  const result = {
     frame: text(input.frame, "research result.frame"),
     competitors: list(
       input.competitors,
       "research result.competitors",
-      (item, path) => {
-        const entry = record(item, path);
-        return {
-          name: text(entry.name, `${path}.name`),
-          relationship: choice(entry.relationship, `${path}.relationship`, ["Direct", "Adjacent", "Analog"] as const),
-          relevance: text(entry.relevance, `${path}.relevance`),
-          signals: textList(entry.signals, `${path}.signals`, { min: 1, max: 3 }),
-          sources: textList(entry.sources, `${path}.sources`, { min: 1, max: 4 }),
-        };
-      },
+      parseCompetitor,
       { min: 4, max: 8 },
     ),
   };
+  if (contract) validateCoverage(result.competitors, contract);
+  return result;
+}
+
+export function parseEvidenceSelection(value: unknown, contract: DecisionContract): Competitor[] {
+  const competitors = list(value, "selected evidence", parseCompetitor, { min: 1, max: 20 });
+  validateCoverage(competitors, contract);
+  return competitors;
+}
+
+export function auditEvidence(contract: DecisionContract, competitors: Competitor[]): CoverageAudit {
+  const requirements = contract.evidenceRequirements.map((requirement) => {
+    const matches = competitors.filter((competitor) => competitor.coverage.some(
+      (coverage) => coverage.requirementId === requirement.id && coverage.stance !== "Context",
+    ));
+    const stances = matches.flatMap((competitor) => competitor.coverage
+      .filter((coverage) => coverage.requirementId === requirement.id)
+      .map((coverage) => coverage.stance));
+    const state = matches.length === 0
+      ? "Missing" as const
+      : stances.includes("Challenges")
+        ? "Contested" as const
+        : "Covered" as const;
+    return { requirement, state, evidenceNames: matches.map((item) => item.name) };
+  });
+  const coveredCount = requirements.filter((item) => item.state !== "Missing").length;
+  const paths = contract.strategicPaths.map((path) => {
+    const pathRequirements = requirements.filter((item) => item.requirement.pathId === path.id);
+    const pathCoveredCount = pathRequirements.filter((item) => item.state !== "Missing").length;
+    return {
+      path,
+      coveredCount: pathCoveredCount,
+      totalCount: pathRequirements.length,
+      state: pathCoveredCount === pathRequirements.length
+        ? "Covered" as const
+        : pathCoveredCount === 0
+          ? "Missing" as const
+          : "Partial" as const,
+    };
+  });
+  return {
+    ready: coveredCount === requirements.length,
+    coveredCount,
+    totalCount: requirements.length,
+    missingRequirementIds: requirements
+      .filter((item) => item.state === "Missing")
+      .map((item) => item.requirement.id),
+    requirements,
+    paths,
+  };
+}
+
+export function suggestEvidenceSelection(
+  contract: DecisionContract,
+  competitors: Competitor[],
+  limit = 6,
+): number[] {
+  const selected: number[] = [];
+  const uncovered = new Set(contract.evidenceRequirements.map((item) => item.id));
+  while (selected.length < limit && uncovered.size) {
+    let bestIndex = -1;
+    let bestCoverage = 0;
+    competitors.forEach((competitor, index) => {
+      if (selected.includes(index)) return;
+      const coverage = new Set(competitor.coverage
+        .filter((item) => item.stance !== "Context" && uncovered.has(item.requirementId))
+        .map((item) => item.requirementId)).size;
+      if (coverage > bestCoverage) {
+        bestIndex = index;
+        bestCoverage = coverage;
+      }
+    });
+    if (bestIndex < 0) break;
+    selected.push(bestIndex);
+    competitors[bestIndex].coverage.forEach((item) => {
+      if (item.stance !== "Context") uncovered.delete(item.requirementId);
+    });
+  }
+  if (!selected.length) return competitors.slice(0, Math.min(4, competitors.length)).map((_, index) => index);
+  return selected;
 }
 
 export function parseBrief(value: unknown): Brief {

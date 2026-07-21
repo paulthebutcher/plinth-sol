@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseBrief, parseDecisionContract, parseDiscovery } from "@/lib/plinth-contracts";
+import {
+  auditEvidence,
+  parseBrief,
+  parseDecisionContract,
+  parseDiscovery,
+  parseEvidenceSelection,
+} from "@/lib/plinth-contracts";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -43,6 +49,39 @@ const CONTRACT_SCHEMA = {
     },
     decisionAuthority: { type: "string" },
     reviewTrigger: { type: "string" },
+    strategicPaths: {
+      type: "array",
+      minItems: 2,
+      maxItems: 4,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          name: { type: "string" },
+          description: { type: "string" },
+        },
+        required: ["id", "name", "description"],
+      },
+    },
+    evidenceRequirements: {
+      type: "array",
+      minItems: 3,
+      maxItems: 12,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          pathId: { type: "string" },
+          question: { type: "string" },
+          evidenceNeeded: { type: "string" },
+          disconfirmingEvidence: { type: "string" },
+          criterionIds: { type: "array", minItems: 1, maxItems: 4, items: { type: "string" } },
+        },
+        required: ["id", "pathId", "question", "evidenceNeeded", "disconfirmingEvidence", "criterionIds"],
+      },
+    },
   },
   required: [
     "decisionStatement",
@@ -52,6 +91,8 @@ const CONTRACT_SCHEMA = {
     "assumptions",
     "decisionAuthority",
     "reviewTrigger",
+    "strategicPaths",
+    "evidenceRequirements",
   ],
 };
 
@@ -69,12 +110,31 @@ const DISCOVERY_SCHEMA = {
         additionalProperties: false,
         properties: {
           name: { type: "string" },
-          relationship: { type: "string", enum: ["Direct", "Adjacent", "Analog"] },
+          relationship: { type: "string", enum: ["Direct", "Adjacent", "Analog", "Candidate"] },
           relevance: { type: "string" },
           signals: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 },
           sources: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 4 },
+          sourceType: {
+            type: "string",
+            enum: ["Primary", "Customer", "Independent", "Regulatory", "Market data"],
+          },
+          coverage: {
+            type: "array",
+            minItems: 1,
+            maxItems: 6,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                requirementId: { type: "string" },
+                stance: { type: "string", enum: ["Supports", "Challenges", "Context"] },
+                explanation: { type: "string" },
+              },
+              required: ["requirementId", "stance", "explanation"],
+            },
+          },
         },
-        required: ["name", "relationship", "relevance", "signals", "sources"],
+        required: ["name", "relationship", "relevance", "signals", "sources", "sourceType", "coverage"],
       },
     },
   },
@@ -256,42 +316,63 @@ export async function POST(request: NextRequest) {
     if (body.action === "contract") {
       const result = await callOpenAI(
         apiKey,
-        `Decision-maker input:\n${body.decision}\n\nCompany: ${body.company}\nWhat it does: ${body.description}\nAdditional context: ${body.context}\n\nDistill this into a decision contract. Number criteria AC-01 onward and assumptions A-01 onward. Verification must describe observable evidence, not a confidence score. State missing authority as Unspecified.`,
+        `Decision-maker input:\n${body.decision}\n\nCompany: ${body.company}\nWhat it does: ${body.description}\nAdditional context: ${body.context}\n\nDistill this into a decision contract. Number criteria AC-01 onward and assumptions A-01 onward. Identify 2–4 materially distinct strategic paths as P-01 onward. For every path, define the smallest set of decision-relevant research questions as evidence requirements ER-01 onward; map each requirement to one path and the acceptance criteria it tests. Include what evidence would answer the question and what evidence would disconfirm the favorable case. Verification and evidence requirements must describe observable evidence, not confidence scores. State missing authority as Unspecified.`,
         CONTRACT_SCHEMA,
         "decision_contract",
         {
           instructions:
-            "You are the Distiller. Convert thin human intent into a precise decision contract. You may clarify and structure only what was supplied. You must not research, recommend an option, invent organizational facts, or resolve uncertainty. Keep hypotheses explicitly labeled as assumptions with concrete falsifiers.",
+            "You are the Distiller. Convert thin human intent into a precise decision contract and a balanced research mandate. You may clarify and structure only what was supplied. You must not research, recommend an option, invent organizational facts, or resolve uncertainty. Keep hypotheses explicitly labeled as assumptions with concrete falsifiers. Give every strategic path at least one evidence requirement. The mandate must ask what could falsify each path, not merely what could support it.",
         },
       );
       return NextResponse.json(parseDecisionContract(result, "v1"));
     }
 
     if (body.action === "discover") {
+      const contract = parseDecisionContract(body.contract);
+      const requestedFocus = Array.isArray(body.focusRequirementIds)
+        ? body.focusRequirementIds.filter((item): item is string => typeof item === "string")
+        : [];
+      const validRequirementIds = new Set(contract.evidenceRequirements.map((item) => item.id));
+      if (requestedFocus.some((id) => !validRequirementIds.has(id))) {
+        return NextResponse.json({ error: "Gap research referenced an unknown evidence requirement." }, { status: 400 });
+      }
+      const mandate = requestedFocus.length
+        ? contract.evidenceRequirements.filter((item) => requestedFocus.includes(item.id))
+        : contract.evidenceRequirements;
       const result = await callOpenAI(
         apiKey,
-        `Frozen decision contract (do not alter):\n${JSON.stringify(body.contract)}\n\nResearch the competitive landscape relevant to this exact contract. Include direct competitors, adjacent alternatives, and useful analogs. Do not merely list famous companies.`,
+        `Frozen decision contract (do not alter):\n${JSON.stringify(contract)}\n\nEvidence requirements to research in this pass:\n${JSON.stringify(mandate)}\n\nResearch the landscape relevant to these exact requirements. Include direct competitors, adjacent alternatives, useful analogs, acquisition candidates when the path requires them, and non-company evidence such as regulatory, market, or financial sources when necessary. Do not merely list famous companies. For each perspective, tag only the ER IDs that its cited evidence genuinely addresses. Context does not close an evidence gap.`,
         DISCOVERY_SCHEMA,
         "competitor_discovery",
         {
           webSearch: true,
           instructions:
-            "You are the Researcher. Gather current public evidence against the frozen decision contract. You cannot change its criteria, assumptions, constraints, or authority, and you cannot recommend or rank an option. Use exact URLs from research. Prefer company pages, filings, documentation, reputable reporting, and customer evidence. If evidence is weak, say so.",
+            "You are the Researcher. Gather current public evidence against the frozen decision contract and its research mandate. You cannot change its paths, criteria, assumptions, constraints, requirements, or authority, and you cannot recommend or rank an option. Use exact requirement IDs and exact source URLs. Prefer primary company materials, filings, regulatory sources, reputable independent reporting, market data, and customer evidence. Tag evidence as Supports, Challenges, or Context. Context never counts as proof. If a requirement cannot be covered, do not fabricate a mapping.",
         },
       );
-      return NextResponse.json(parseDiscovery(result));
+      return NextResponse.json(parseDiscovery(result, contract));
     }
 
     if (body.action === "analyze") {
+      const contract = parseDecisionContract(body.contract);
+      const competitors = parseEvidenceSelection(body.competitors, contract);
+      const coverageAudit = auditEvidence(contract, competitors);
+      const provisional = body.provisional === true;
+      if (!coverageAudit.ready && !provisional) {
+        return NextResponse.json(
+          { error: "The selected evidence does not cover the frozen research mandate. Research the gaps or explicitly build a provisional brief." },
+          { status: 409 },
+        );
+      }
       const result = await callOpenAI(
         apiKey,
-        `Frozen decision contract (do not alter):\n${JSON.stringify(body.contract)}\n\nHuman-selected research set:\n${JSON.stringify(body.competitors)}\n\nResearch these selections more deeply. Create 3 or 4 genuinely distinct strategic postures. For each posture, map every acceptance criterion to Supports, Tensions, or Unknown. Give evidence stable IDs E1 onward, exact source URLs, and an epistemic state. Expose assumptions, counterevidence, and the cheapest falsification test.`,
+        `Frozen decision contract (do not alter):\n${JSON.stringify(contract)}\n\nHuman-selected research set:\n${JSON.stringify(competitors)}\n\nDeterministic evidence-coverage audit:\n${JSON.stringify(coverageAudit)}\n\nBrief status: ${provisional ? "PROVISIONAL — readiness was explicitly overridden" : "AUDITED — all mandated evidence questions have coverage"}.\n\nResearch these selections more deeply. Create 3 or 4 genuinely distinct strategic postures. For each posture, map every acceptance criterion to Supports, Tensions, or Unknown. Give evidence stable IDs E1 onward, exact source URLs, and an epistemic state. Expose assumptions, counterevidence, coverage gaps, and the cheapest falsification test. Do not smooth over missing mandate coverage in a provisional brief.`,
         ANALYSIS_SCHEMA,
         "decision_brief",
         {
           webSearch: true,
           instructions:
-            "You are the Analyst. Evaluate distinct postures against a frozen contract and cited current evidence. You cannot change the contract, suppress contradictions, rank postures, declare a winner, or turn supplied context into proof. Preserve hypotheses as assumptions. Unknown means unknown.",
+            "You are the Analyst. Evaluate distinct postures against a frozen contract, a deterministic coverage audit, and cited current evidence. You cannot change the contract or mandate, certify the evidence set, suppress contradictions, rank postures, declare a winner, or turn supplied context into proof. Preserve hypotheses as assumptions. Unknown means unknown. When the brief is provisional, make the uncovered requirements materially visible in the disagreement, posture tensions, and unresolved questions.",
         },
       );
       return NextResponse.json(parseBrief(result));

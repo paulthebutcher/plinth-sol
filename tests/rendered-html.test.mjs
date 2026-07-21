@@ -34,6 +34,10 @@ test("encodes separation of powers in the analysis endpoint", async () => {
   assert.match(route, /You are the Researcher/);
   assert.match(route, /You are the Analyst/);
   assert.match(route, /Frozen decision contract \(do not alter\)/);
+  assert.match(route, /auditEvidence/);
+  assert.match(route, /explicitly build a provisional brief/);
   assert.match(studio, /Reasoning is part of the deliverable/);
+  assert.match(studio, /EVIDENCE READINESS · DETERMINISTIC GATE/);
+  assert.match(studio, /Research missing evidence/);
   assert.match(studio, /Prepare execution packet/);
 });
