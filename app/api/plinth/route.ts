@@ -368,13 +368,12 @@ export async function POST(request: NextRequest) {
       }
       const result = await callOpenAI(
         apiKey,
-        `Frozen decision contract (do not alter):\n${JSON.stringify(contract)}\n\nHuman-selected research set:\n${JSON.stringify(competitors)}\n\nDeterministic evidence-coverage audit:\n${JSON.stringify(coverageAudit)}\n\nBrief status: ${provisional ? "PROVISIONAL — readiness was explicitly overridden" : "AUDITED — all mandated evidence questions have coverage"}.\n\nResearch these selections more deeply. Create 3 or 4 genuinely distinct strategic postures. For each posture, map every acceptance criterion to Supports, Tensions, or Unknown. Give evidence stable IDs E1 onward, exact source URLs, and an epistemic state. Expose assumptions, counterevidence, coverage gaps, and the cheapest falsification test. Do not smooth over missing mandate coverage in a provisional brief.`,
+        `Frozen decision contract (do not alter):\n${JSON.stringify(contract)}\n\nHuman-selected research set:\n${JSON.stringify(competitors)}\n\nDeterministic evidence-coverage audit:\n${JSON.stringify(coverageAudit)}\n\nBrief status: ${provisional ? "PROVISIONAL — readiness was explicitly overridden" : "AUDITED — all mandated evidence questions have coverage"}.\n\nUsing only the selected evidence above, create 3 or 4 genuinely distinct strategic postures. Do not add facts or sources from outside this reviewed set. For each posture, map every acceptance criterion to Supports, Tensions, or Unknown. Give evidence stable IDs E1 onward, preserve the exact selected source URLs, and assign an epistemic state. Expose assumptions, counterevidence, coverage gaps, and the cheapest falsification test. Do not smooth over missing mandate coverage in a provisional brief.`,
         ANALYSIS_SCHEMA,
         "decision_brief",
         {
-          webSearch: true,
           instructions:
-            "You are the Analyst. Evaluate distinct postures against a frozen contract, a deterministic coverage audit, and cited current evidence. You cannot change the contract or mandate, certify the evidence set, suppress contradictions, rank postures, declare a winner, or turn supplied context into proof. Preserve hypotheses as assumptions. Unknown means unknown. When the brief is provisional, make the uncovered requirements materially visible in the disagreement, posture tensions, and unresolved questions.",
+            "You are the Analyst. Evaluate distinct postures against a frozen contract, a deterministic coverage audit, and the human-selected evidence set. You have no research authority: you cannot add a source, fact, or claim that is absent from the selected set. You cannot change the contract or mandate, certify the evidence set, suppress contradictions, rank postures, declare a winner, or turn supplied context into proof. Preserve hypotheses as assumptions. Unknown means unknown. When the brief is provisional, make the uncovered requirements materially visible in the disagreement, posture tensions, and unresolved questions.",
         },
       );
       return NextResponse.json(parseBrief(result));
