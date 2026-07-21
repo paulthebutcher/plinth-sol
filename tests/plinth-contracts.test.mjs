@@ -59,6 +59,27 @@ test("accepts a complete discovery response", () => {
   assert.equal(result.competitors[0].name, "Example");
 });
 
+test("normalizes repeated evidence tags without hiding a challenge", () => {
+  const result = parseDiscovery({
+    frame: "The strategic frame",
+    competitors: [
+      competitor({ coverage: [
+        { requirementId: "ER-01", stance: "Supports", explanation: "The market signal is favorable." },
+        { requirementId: "ER-01", stance: "Challenges", explanation: "The sales cycle remains long." },
+      ] }),
+      competitor({ name: "Two" }),
+      competitor({ name: "Three" }),
+      competitor({ name: "Four" }),
+    ],
+  }, contract);
+
+  assert.deepEqual(result.competitors[0].coverage, [{
+    requirementId: "ER-01",
+    stance: "Challenges",
+    explanation: "The market signal is favorable. The sales cycle remains long.",
+  }]);
+});
+
 test("rejects non-string fields before React can render them", () => {
   assert.throws(
     () => parseDiscovery({

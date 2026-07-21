@@ -137,6 +137,33 @@ function requireUnique(values: string[], path: string) {
   if (new Set(values).size !== values.length) throw new PlinthShapeError(path);
 }
 
+function deduplicateCoverage(coverage: EvidenceCoverage[]): EvidenceCoverage[] {
+  const merged = new Map<string, EvidenceCoverage>();
+  const stancePriority = { Context: 0, Supports: 1, Challenges: 2 } as const;
+
+  for (const item of coverage) {
+    const existing = merged.get(item.requirementId);
+    if (!existing) {
+      merged.set(item.requirementId, item);
+      continue;
+    }
+
+    // A source can legitimately contain both confirming and cautionary material.
+    // Preserve the more conservative reading rather than rejecting the whole run.
+    const stance = stancePriority[item.stance] > stancePriority[existing.stance]
+      ? item.stance
+      : existing.stance;
+    const explanations = [...new Set([existing.explanation, item.explanation])];
+    merged.set(item.requirementId, {
+      requirementId: item.requirementId,
+      stance,
+      explanation: explanations.join(" "),
+    });
+  }
+
+  return [...merged.values()];
+}
+
 export function parseDecisionContract(value: unknown, fallbackVersion?: string): DecisionContract {
   const input = record(value, "decision contract");
   const result: DecisionContract = {
@@ -241,7 +268,7 @@ function parseCompetitor(value: unknown, path: string): Competitor {
       `${path}.sourceType`,
       ["Primary", "Customer", "Independent", "Regulatory", "Market data"] as const,
     ),
-    coverage: list(
+    coverage: deduplicateCoverage(list(
       entry.coverage,
       `${path}.coverage`,
       (coverageItem, coveragePath) => {
@@ -257,17 +284,13 @@ function parseCompetitor(value: unknown, path: string): Competitor {
         };
       },
       { min: 1, max: 6 },
-    ),
+    )),
   };
 }
 
 function validateCoverage(competitors: Competitor[], contract: DecisionContract) {
   const requirementIds = new Set(contract.evidenceRequirements.map((item) => item.id));
   for (const competitor of competitors) {
-    requireUnique(
-      competitor.coverage.map((item) => item.requirementId),
-      `research result.competitors.${competitor.name}.coverage requirement ids`,
-    );
     if (competitor.coverage.some((item) => !requirementIds.has(item.requirementId))) {
       throw new PlinthShapeError(`research result.competitors.${competitor.name}.coverage`);
     }

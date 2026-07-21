@@ -342,7 +342,7 @@ export async function POST(request: NextRequest) {
         : contract.evidenceRequirements;
       const result = await callOpenAI(
         apiKey,
-        `Frozen decision contract (do not alter):\n${JSON.stringify(contract)}\n\nEvidence requirements to research in this pass:\n${JSON.stringify(mandate)}\n\nResearch the landscape relevant to these exact requirements. Include direct competitors, adjacent alternatives, useful analogs, acquisition candidates when the path requires them, and non-company evidence such as regulatory, market, or financial sources when necessary. Do not merely list famous companies. For each perspective, tag only the ER IDs that its cited evidence genuinely addresses. Context does not close an evidence gap.`,
+        `Frozen decision contract (do not alter):\n${JSON.stringify(contract)}\n\nEvidence requirements to research in this pass:\n${JSON.stringify(mandate)}\n\nResearch the landscape relevant to these exact requirements. Include direct competitors, adjacent alternatives, useful analogs, acquisition candidates when the path requires them, and non-company evidence such as regulatory, market, or financial sources when necessary. Do not merely list famous companies. For each perspective, tag only the ER IDs that its cited evidence genuinely addresses, and include each ER ID at most once. If one source has both favorable and cautionary evidence for an ER, tag it Challenges and state the tension. Context does not close an evidence gap.`,
         DISCOVERY_SCHEMA,
         "competitor_discovery",
         {
