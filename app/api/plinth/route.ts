@@ -199,7 +199,7 @@ async function callOpenAI(
   options: CallOptions,
 ) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 180_000);
+  const timeout = setTimeout(() => controller.abort(), 90_000);
   try {
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",

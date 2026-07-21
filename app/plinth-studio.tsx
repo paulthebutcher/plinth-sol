@@ -29,6 +29,7 @@ export function PlinthStudio() {
   const [context, setContext] = useState("");
   const [frame, setFrame] = useState("");
   const [contract, setContract] = useState<DecisionContract | null>(null);
+  const [contractDecision, setContractDecision] = useState("");
   const [competitors, setCompetitors] = useState<Competitor[]>([]);
   const [selected, setSelected] = useState<number[]>([]);
   const [brief, setBrief] = useState<Brief | null>(null);
@@ -72,9 +73,15 @@ export function PlinthStudio() {
   async function discover() {
     setError(""); setStage("discovering");
     try {
-      const frozenContract = parseDecisionContract(await request("contract"));
-      setContract(frozenContract);
-      setLedger([{ id: 1, actor: "Distiller", action: `Froze decision contract ${frozenContract.version}`, why: "Research needs an explicit reference intent that downstream roles cannot rewrite.", references: frozenContract.acceptanceCriteria.map(item => item.id), at: new Date().toISOString() }]);
+      const canReuseContract = contract && contractDecision === decision;
+      const frozenContract = canReuseContract
+        ? contract
+        : parseDecisionContract(await request("contract"));
+      if (!canReuseContract) {
+        setContract(frozenContract);
+        setContractDecision(decision);
+        setLedger([{ id: 1, actor: "Distiller", action: `Froze decision contract ${frozenContract.version}`, why: "Research needs an explicit reference intent that downstream roles cannot rewrite.", references: frozenContract.acceptanceCriteria.map(item => item.id), at: new Date().toISOString() }]);
+      }
       const data = parseDiscovery(await request("discover", { contract: frozenContract }));
       setFrame(data.frame);
       setCompetitors(data.competitors);
