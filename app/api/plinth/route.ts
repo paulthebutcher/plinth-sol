@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseBrief, parseDecisionContract, parseDiscovery } from "@/lib/plinth-contracts";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 export const maxDuration = 300;
 
 const CONTRACT_SCHEMA = {
