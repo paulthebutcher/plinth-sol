@@ -219,6 +219,7 @@ const ANALYSIS_SCHEMA = {
 
 type CallOptions = {
   webSearch?: boolean;
+  reasoningEffort?: "low" | "medium";
   instructions: string;
 };
 
@@ -267,7 +268,7 @@ async function callOpenAI(
       body: JSON.stringify({
         model: "gpt-5.6-terra",
         ...(options.webSearch ? { tools: [{ type: "web_search" }], tool_choice: "auto" } : {}),
-        reasoning: { effort: "medium" },
+        reasoning: { effort: options.reasoningEffort ?? "medium" },
         instructions: options.instructions,
         input: prompt,
         text: { format: { type: "json_schema", name, strict: true, schema } },
@@ -346,6 +347,7 @@ export async function POST(request: NextRequest) {
         "competitor_discovery",
         {
           webSearch: true,
+          reasoningEffort: "low",
           instructions:
             "You are the Researcher. Gather current public evidence against the frozen decision contract and its research mandate. You cannot change its paths, criteria, assumptions, constraints, requirements, or authority, and you cannot recommend or rank an option. Use exact requirement IDs and exact source URLs. Prefer primary company materials, filings, regulatory sources, reputable independent reporting, market data, and customer evidence. Tag evidence as Supports, Challenges, or Context. Context never counts as proof. If a requirement cannot be covered, do not fabricate a mapping.",
         },
