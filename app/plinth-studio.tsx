@@ -169,21 +169,27 @@ export function PlinthStudio() {
     setError(""); setNotice(""); setStage("analyzing");
     try {
       const chosen = selectedEvidence;
-      setLedger(entries => [...entries, { id: entries.length + 1, actor: "Decision maker", action: "Accepted the evidence set", why: "Only human-selected perspectives are allowed to shape the brief.", references: chosen.map(item => item.name), at: new Date().toISOString() }]);
-      setLedger(entries => [...entries, {
-        id: entries.length + 1,
-        actor: provisional ? "Decision maker" : "Coverage auditor",
-        action: provisional ? "Overrode the evidence readiness gate" : "Cleared the evidence readiness gate",
-        why: provisional
-          ? `The decision maker authorized a provisional brief with ${coverageAudit.missingRequirementIds.length} visible gaps.`
-          : "Every frozen evidence requirement has at least one selected supporting or challenging perspective.",
-        references: provisional ? coverageAudit.missingRequirementIds : contract.evidenceRequirements.map((item) => item.id),
-        at: new Date().toISOString(),
-      }]);
       const data = parseBrief(await request("analyze", { contract, competitors: chosen, provisional }));
       setBrief(data);
       setBriefProvisional(provisional);
-      setLedger(entries => [...entries, { id: entries.length + 1, actor: "Analyst", action: "Produced distinct postures", why: "Each posture was checked against the frozen acceptance criteria without selecting a winner.", references: data.postures.map((item: Posture) => item.name), at: new Date().toISOString() }]);
+      setLedger(entries => {
+        const at = new Date().toISOString();
+        return [
+          ...entries,
+          { id: entries.length + 1, actor: "Decision maker", action: "Accepted the evidence set", why: "Only human-selected perspectives are allowed to shape the brief.", references: chosen.map(item => item.name), at },
+          {
+            id: entries.length + 2,
+            actor: provisional ? "Decision maker" : "Coverage auditor",
+            action: provisional ? "Overrode the evidence readiness gate" : "Cleared the evidence readiness gate",
+            why: provisional
+              ? `The decision maker authorized a provisional brief with ${coverageAudit.missingRequirementIds.length} visible gaps.`
+              : "Every frozen evidence requirement has at least one selected supporting or challenging perspective.",
+            references: provisional ? coverageAudit.missingRequirementIds : contract.evidenceRequirements.map((item) => item.id),
+            at,
+          },
+          { id: entries.length + 3, actor: "Analyst", action: "Produced distinct postures", why: "Each posture was checked against the frozen acceptance criteria without selecting a winner.", references: data.postures.map((item: Posture) => item.name), at },
+        ];
+      });
       setStage("brief");
     }
     catch (e) { setError(e instanceof Error ? e.message : "Analysis failed"); setStage("select"); }
