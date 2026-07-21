@@ -1,31 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
-type Competitor = { name: string; relationship: string; relevance: string; signals: string[]; sources: string[] };
-type DecisionContract = {
-  version: string;
-  decisionStatement: string;
-  acceptanceCriteria: { id: string; criterion: string; verification: string }[];
-  constraints: string[];
-  nonGoals: string[];
-  assumptions: { id: string; claim: string; falsifier: string }[];
-  decisionAuthority: string;
-  reviewTrigger: string;
-};
-type Posture = {
-  name: string;
-  mode: string;
-  thesis: string;
-  optimizes: string;
-  givesUp: string;
-  support: { id: string; claim: string; source: string; epistemicState: "Evidence-supported" | "Contested" | "Unknown" }[];
-  assumptions: string[];
-  counterevidence: string[];
-  criteriaCoverage: { criterionId: string; fit: "Supports" | "Tensions" | "Unknown"; explanation: string }[];
-  nextTest: string;
-};
-type Brief = { reframe: string; disagreement: string; postures: Posture[]; unresolved: string[] };
+import {
+  parseBrief,
+  parseDecisionContract,
+  parseDiscovery,
+  type Brief,
+  type Competitor,
+  type DecisionContract,
+  type Posture,
+} from "@/lib/plinth-contracts";
 type LedgerEntry = { id: number; actor: "Distiller" | "Researcher" | "Analyst" | "Decision maker"; action: string; why: string; references: string[]; at: string };
 
 const examples = [
@@ -54,19 +38,44 @@ export function PlinthStudio() {
   const [error, setError] = useState("");
 
   async function request(action: "contract" | "discover" | "analyze", extra: object = {}) {
-    const response = await fetch("/api/plinth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, decision, company, description, context, ...extra }) });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Request failed");
+    let response: Response;
+    try {
+      response = await fetch("/api/plinth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ action, decision, company, description, context, ...extra }),
+      });
+    } catch {
+      throw new Error("Plinth could not reach the analysis service. Check your connection and try again.");
+    }
+
+    const raw = await response.text();
+    let data: unknown;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      if (!response.ok) {
+        throw new Error("The analysis service had a temporary problem. Please try again.");
+      }
+      throw new Error("The analysis service returned an unreadable result. Please try again.");
+    }
+
+    if (!response.ok) {
+      const message = data && typeof data === "object" && "error" in data && typeof data.error === "string"
+        ? data.error
+        : "The analysis service had a temporary problem. Please try again.";
+      throw new Error(message);
+    }
     return data;
   }
 
   async function discover() {
     setError(""); setStage("discovering");
     try {
-      const frozenContract = await request("contract") as DecisionContract;
+      const frozenContract = parseDecisionContract(await request("contract"));
       setContract(frozenContract);
       setLedger([{ id: 1, actor: "Distiller", action: `Froze decision contract ${frozenContract.version}`, why: "Research needs an explicit reference intent that downstream roles cannot rewrite.", references: frozenContract.acceptanceCriteria.map(item => item.id), at: new Date().toISOString() }]);
-      const data = await request("discover", { contract: frozenContract });
+      const data = parseDiscovery(await request("discover", { contract: frozenContract }));
       setFrame(data.frame);
       setCompetitors(data.competitors);
       setSelected(data.competitors.map((_: Competitor, i: number) => i).slice(0, 4));
@@ -82,7 +91,7 @@ export function PlinthStudio() {
     try {
       const chosen = selected.map((i) => competitors[i]);
       setLedger(entries => [...entries, { id: entries.length + 1, actor: "Decision maker", action: "Accepted the evidence set", why: "Only human-selected perspectives are allowed to shape the brief.", references: chosen.map(item => item.name), at: new Date().toISOString() }]);
-      const data = await request("analyze", { contract, competitors: chosen });
+      const data = parseBrief(await request("analyze", { contract, competitors: chosen }));
       setBrief(data);
       setLedger(entries => [...entries, { id: entries.length + 1, actor: "Analyst", action: "Produced distinct postures", why: "Each posture was checked against the frozen acceptance criteria without selecting a winner.", references: data.postures.map((item: Posture) => item.name), at: new Date().toISOString() }]);
       setStage("brief");

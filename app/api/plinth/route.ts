@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { parseBrief, parseDecisionContract, parseDiscovery } from "@/lib/plinth-contracts";
 
 export const runtime = "edge";
+export const maxDuration = 300;
 
 const CONTRACT_SCHEMA = {
   type: "object",
@@ -160,14 +162,33 @@ type CallOptions = {
   instructions: string;
 };
 
-function readOutput(response: { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }) {
-  if (response.output_text) return response.output_text;
-  for (const item of response.output ?? []) {
-    for (const content of item.content ?? []) {
-      if (content.type === "output_text" && content.text) return content.text;
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readOutput(response: unknown) {
+  if (!isRecord(response)) throw new Error("The model returned an unreadable response.");
+  if (typeof response.output_text === "string" && response.output_text) return response.output_text;
+  if (Array.isArray(response.output)) {
+    for (const item of response.output) {
+      if (!isRecord(item) || !Array.isArray(item.content)) continue;
+      for (const content of item.content) {
+        if (isRecord(content) && content.type === "output_text" && typeof content.text === "string" && content.text) {
+          return content.text;
+        }
+      }
     }
   }
   throw new Error("The model returned no structured output.");
+}
+
+function upstreamError(data: unknown, status: number) {
+  if (isRecord(data) && isRecord(data.error) && typeof data.error.message === "string") {
+    return data.error.message;
+  }
+  return `The research provider returned an error (${status}). Please try again.`;
 }
 
 async function callOpenAI(
@@ -177,26 +198,56 @@ async function callOpenAI(
   name: string,
   options: CallOptions,
 ) {
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: "gpt-5.6-terra",
-      ...(options.webSearch ? { tools: [{ type: "web_search" }], tool_choice: "auto" } : {}),
-      reasoning: { effort: "medium" },
-      instructions: options.instructions,
-      input: prompt,
-      text: { format: { type: "json_schema", name, strict: true, schema } },
-    }),
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data?.error?.message ?? "OpenAI request failed.");
-  return JSON.parse(readOutput(data));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180_000);
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: "gpt-5.6-terra",
+        ...(options.webSearch ? { tools: [{ type: "web_search" }], tool_choice: "auto" } : {}),
+        reasoning: { effort: "medium" },
+        instructions: options.instructions,
+        input: prompt,
+        text: { format: { type: "json_schema", name, strict: true, schema } },
+      }),
+      signal: controller.signal,
+    });
+
+    const raw = await response.text();
+    let data: unknown;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      throw new Error(`The research provider returned an unreadable response (${response.status}). Please try again.`);
+    }
+    if (!response.ok) throw new Error(upstreamError(data, response.status));
+
+    try {
+      return JSON.parse(readOutput(data));
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error("The model returned invalid structured output. Please try again.");
+      }
+      throw error;
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Live research took too long. Please try again.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    const body: unknown = await request.json();
+    if (!isRecord(body)) {
+      return NextResponse.json({ error: "The request body must be a JSON object." }, { status: 400 });
+    }
     const apiKey = process.env.OPENAI_API_KEY?.trim();
     if (!apiKey) {
       return NextResponse.json({ error: "Live research is not configured." }, { status: 503 });
@@ -213,7 +264,7 @@ export async function POST(request: NextRequest) {
             "You are the Distiller. Convert thin human intent into a precise decision contract. You may clarify and structure only what was supplied. You must not research, recommend an option, invent organizational facts, or resolve uncertainty. Keep hypotheses explicitly labeled as assumptions with concrete falsifiers.",
         },
       );
-      return NextResponse.json({ version: "v1", ...result });
+      return NextResponse.json(parseDecisionContract(result, "v1"));
     }
 
     if (body.action === "discover") {
@@ -228,7 +279,7 @@ export async function POST(request: NextRequest) {
             "You are the Researcher. Gather current public evidence against the frozen decision contract. You cannot change its criteria, assumptions, constraints, or authority, and you cannot recommend or rank an option. Use exact URLs from research. Prefer company pages, filings, documentation, reputable reporting, and customer evidence. If evidence is weak, say so.",
         },
       );
-      return NextResponse.json(result);
+      return NextResponse.json(parseDiscovery(result));
     }
 
     if (body.action === "analyze") {
@@ -243,7 +294,7 @@ export async function POST(request: NextRequest) {
             "You are the Analyst. Evaluate distinct postures against a frozen contract and cited current evidence. You cannot change the contract, suppress contradictions, rank postures, declare a winner, or turn supplied context into proof. Preserve hypotheses as assumptions. Unknown means unknown.",
         },
       );
-      return NextResponse.json(result);
+      return NextResponse.json(parseBrief(result));
     }
 
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
